@@ -85,3 +85,20 @@ void KalynaDecipher(uint64_t* ciphertext, kalyna_t* ctx, uint64_t* plaintext);
 
 #endif  /* KALYNA_H */
 
+/* Radomyr's adds */
+int kalyna_encrypt_block_api(
+    const uint8_t* plaintext,
+    const uint8_t* key,
+    int block_size_bits,
+    int key_size_bits,
+    uint8_t* ciphertext
+);
+
+int kalyna_encrypt_rounds_api(
+    const uint8_t* plaintext,
+    const uint8_t* key,
+    int block_size_bits,
+    int key_size_bits,
+    int rounds,
+    uint8_t* ciphertext
+);
