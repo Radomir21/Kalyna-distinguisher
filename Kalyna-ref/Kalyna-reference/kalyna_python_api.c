@@ -4,6 +4,10 @@
 
 #include "kalyna.h"
 
+void EncipherRound(kalyna_t* ctx);
+void AddRoundKey(int round, kalyna_t* ctx);
+void XorRoundKey(int round, kalyna_t* ctx);
+
 #ifdef _WIN32
 #define API_EXPORT __declspec(dllexport)
 #else
