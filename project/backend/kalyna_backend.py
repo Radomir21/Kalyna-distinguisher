@@ -1,7 +1,10 @@
 from __future__ import annotations
+
 import os
-from typing import Tuple
+from typing import Sequence, Tuple
+
 import numpy as np
+
 from project.backend.kalyna_adapter import KalynaAdapter, make_default_adapter
 
 
@@ -36,9 +39,6 @@ class KalynaBackend:
         paired = self.xor_bytes(plaintext, input_diff)
         return plaintext, paired
 
-    def encrypt_block(self, plaintext: bytes, key: bytes) -> bytes:
-        return self.adapter.encrypt_block(plaintext, key)
-
     def encrypt_rounds(self, plaintext: bytes, key: bytes, rounds: int) -> bytes:
         return self.adapter.encrypt_rounds(plaintext, key, rounds)
 
@@ -58,18 +58,37 @@ class KalynaBackend:
         arr = np.frombuffer(x, dtype=np.uint8)
         return np.unpackbits(arr)
 
-    def vectorize_pair(self, ct0: bytes, ct1: bytes) -> np.ndarray:
-  
-        if len(ct0) != self.block_size_bytes or len(ct1) != self.block_size_bytes:
-            raise ValueError("Ciphertexts have invalid length")
+    def select_bytes(self, block: bytes, byte_indices: Sequence[int]) -> bytes:
+        if len(block) != self.block_size_bytes:
+            raise ValueError("Invalid block size")
 
-        diff = self.xor_bytes(ct0, ct1)
+        selected = []
+        for idx in byte_indices:
+            if idx < 0 or idx >= self.block_size_bytes:
+                raise ValueError(
+                    f"Byte index {idx} out of range for block of {self.block_size_bytes} bytes"
+                )
+            selected.append(block[idx])
 
-        v0 = self.bytes_to_bits(ct0)
-        v1 = self.bytes_to_bits(ct1)
-        vd = self.bytes_to_bits(diff)
+        return bytes(selected)
 
-        return np.concatenate([v0, v1, vd]).astype(np.uint8)
+    def vectorize_selected_bytes(
+        self,
+        ct0: bytes,
+        ct1: bytes,
+        byte_indices: Sequence[int],
+    ) -> np.ndarray:
+        """
+        AES-like representation:
+        select bytes from ct0 and ct1, concatenate them, convert to bits.
 
-    def feature_size(self) -> int:
-        return self.block_size_bits * 3
+        If len(byte_indices) = 2, feature size = 2 * 2 * 8 = 32 bits.
+        """
+        ct0_sel = self.select_bytes(ct0, byte_indices)
+        ct1_sel = self.select_bytes(ct1, byte_indices)
+        merged = ct0_sel + ct1_sel
+        return self.bytes_to_bits(merged).astype(np.uint8)
+
+    @staticmethod
+    def selected_feature_size(byte_indices: Sequence[int]) -> int:
+        return len(byte_indices) * 2 * 8

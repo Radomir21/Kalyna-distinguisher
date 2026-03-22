@@ -177,8 +177,7 @@ class KalynaAdapter:
 def get_default_dll_path() -> Path:
     """
     Ищем DLL здесь:
-    1) рядом с reference implementation
-    2) fallback: project/build/kalyna_ref.dll
+    fallback: project/build/kalyna_ref.dll
     """
     current_file = Path(__file__).resolve()
 
