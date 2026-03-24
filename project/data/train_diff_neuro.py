@@ -19,7 +19,7 @@ train_diff_neuro.py
   Table 2: 3-round — один рядок, один стовпець
   Table 3: 3-round — два байти
   Table 4: 2-round — один байт
-  Table 5: 2-round — два байти  ← головний результат статті (≈100% для AES)
+  Table 5: 2-round — два байти  - результат статті (≈100% для AES)
 """
 
 from __future__ import annotations
