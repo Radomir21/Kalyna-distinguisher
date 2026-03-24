@@ -21,16 +21,12 @@ class ResidualBlock1D(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x + self.block(x)
 
-
-class AESLikeResNetDistinguisher(nn.Module):
-    """
-    PyTorch version inspired by the AES repository:
-
-    input shape: (batch, num_blocks * word_size_bits)
+""" input shape: (batch, num_blocks * word_size_bits)
     reshape -> (batch, num_blocks, word_size_bits)
     permute -> (batch, word_size_bits, num_blocks)
     Conv1d(1x1) -> residual tower -> flatten -> dense head -> 1 logit
-    """
+"""
+class AESLikeResNetDistinguisher(nn.Module):
 
     def __init__(
         self,

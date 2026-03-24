@@ -175,13 +175,9 @@ class KalynaAdapter:
 
 
 def get_default_dll_path() -> Path:
-    """
-    Ищем DLL здесь:
-    fallback: project/build/kalyna_ref.dll
-    """
+
     current_file = Path(__file__).resolve()
 
-    # .../project/backend/kalyna_adapter.py
     project_dir = current_file.parent.parent
     repo_root = project_dir.parent
 

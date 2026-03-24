@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import os
-from typing import Sequence, Tuple
-
-import numpy as np
+from typing import Tuple
 
 from project.backend.kalyna_adapter import KalynaAdapter, make_default_adapter
 
@@ -52,43 +50,3 @@ class KalynaBackend:
         ct0 = self.encrypt_rounds(pt0, key, rounds)
         ct1 = self.encrypt_rounds(pt1, key, rounds)
         return ct0, ct1
-
-    @staticmethod
-    def bytes_to_bits(x: bytes) -> np.ndarray:
-        arr = np.frombuffer(x, dtype=np.uint8)
-        return np.unpackbits(arr)
-
-    def select_bytes(self, block: bytes, byte_indices: Sequence[int]) -> bytes:
-        if len(block) != self.block_size_bytes:
-            raise ValueError("Invalid block size")
-
-        selected = []
-        for idx in byte_indices:
-            if idx < 0 or idx >= self.block_size_bytes:
-                raise ValueError(
-                    f"Byte index {idx} out of range for block of {self.block_size_bytes} bytes"
-                )
-            selected.append(block[idx])
-
-        return bytes(selected)
-
-    def vectorize_selected_bytes(
-        self,
-        ct0: bytes,
-        ct1: bytes,
-        byte_indices: Sequence[int],
-    ) -> np.ndarray:
-        """
-        AES-like representation:
-        select bytes from ct0 and ct1, concatenate them, convert to bits.
-
-        If len(byte_indices) = 2, feature size = 2 * 2 * 8 = 32 bits.
-        """
-        ct0_sel = self.select_bytes(ct0, byte_indices)
-        ct1_sel = self.select_bytes(ct1, byte_indices)
-        merged = ct0_sel + ct1_sel
-        return self.bytes_to_bits(merged).astype(np.uint8)
-
-    @staticmethod
-    def selected_feature_size(byte_indices: Sequence[int]) -> int:
-        return len(byte_indices) * 2 * 8

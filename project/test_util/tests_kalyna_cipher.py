@@ -1,4 +1,9 @@
-from backend.kalyna_adapter import make_default_adapter
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+
+from project.backend.kalyna_adapter import make_default_adapter
 
 
 def main():

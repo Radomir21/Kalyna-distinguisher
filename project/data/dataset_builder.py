@@ -1,5 +1,4 @@
 """
-dataset_builder_extended.py
 
 Генерація датасетів для нейро-розрізнювача блокового шифру Калина.
 
@@ -30,9 +29,6 @@ from typing import List, Sequence, Tuple
 
 import numpy as np
 
-# ---------------------------------------------------------------------------
-# Константи матриці стану (128-бітний блок = 16 байтів)
-# ---------------------------------------------------------------------------
 
 BLOCK_BYTES = 16        # розмір блоку в байтах
 STATE_ROWS = 4          # кількість рядків матриці стану
@@ -52,34 +48,31 @@ def _col_indices(col: int) -> List[int]:
     return [row * STATE_COLS + col for row in range(STATE_ROWS)]
 
 
-# Для Kalyna-128-128 з вхідною різницею delta = 0x00..001
-# ShiftRows зсуває рядки: рядок i зсувається на i байтів вліво.
-# Після одного раунду (SubBytes → ShiftRows → MixColumns) різниця
-# у байті 15 (рядок 3, стовпець 3) поширюється на стовпець 3 → {3,7,11,15}.
-#
-# Zhang et al. (Table 5) для AES виявили, що байти з ОДНАКОВИМИ
-# позиціями у C0 і C1, залежно від обраної різниці delta, дають
-# 100% точність для 2-раундового розрізнювача.
-#
-# Для delta = 0x00000000000000000000000000000001 (байт 15):
-#   після 1 раунду: найсильніший сигнал у байтах 14,15 (Zhang et al., Table 5)
+"""Для Kalyna-128-128 з вхідною різницею delta = 0x00..001
+ShiftRows зсуває рядки: рядок i зсувається на i байтів вліво.
+Після одного раунду (SubBytes → ShiftRows → MixColumns) різниця
+у байті 15 (рядок 3, стовпець 3) поширюється на стовпець 3 → {3,7,11,15}.
+
+Zhang et al. (Table 5) для AES виявили, що байти з ОДНАКОВИМИ
+позиціями у C0 і C1, залежно від обраної різниці delta, дають
+100% точність для 2-раундового розрізнювача.
+
+Для delta = 0x00000000000000000000000000000001 (байт 15):
+після 1 раунду: найсильніший сигнал у байтах 14,15 (Zhang et al., Table 5)
 BEST_2_BYTES_FOR_DELTA_LSB = [14, 15]
+"""
 
-
-# ---------------------------------------------------------------------------
-# Клас SubsetType
-# ---------------------------------------------------------------------------
-
-class SubsetType(Enum):
-    """Типи підмножин шифротексту, що вивчаються у роботі.
+"""Типи підмножин шифротексту, що вивчаються у роботі.
     
     Відповідають розділам 3.1 і 3.2 Zhang et al. (2024):
-      FULL         — повний шифротекст (128 біт)   → ознак 2*128=256 біт
-      ROW_i        — рядок i матриці стану (32 біт) → ознак 2*32=64 біт
-      COL_j        — стовпець j (32 біти)           → ознак 2*32=64 біт
-      TWO_BYTES    — довільна пара байтів (16 біт)  → ознак 2*16=32 біти
-      ONE_BYTE     — один байт (8 біт)              → ознак 2*8=16 біт
-    """
+      FULL         — повний шифротекст (128 біт)    ознак 2*128=256 біт
+      ROW_i        — рядок i матриці стану (32 біт)  ознак 2*32=64 біт
+      COL_j        — стовпець j (32 біти)            ознак 2*32=64 біт
+      TWO_BYTES    — довільна пара байтів (16 біт)   ознак 2*16=32 біти
+      ONE_BYTE     — один байт (8 біт)               ознак 2*8=16 біт
+"""
+class SubsetType(Enum):
+
     FULL = auto()
     ROW_0 = auto()
     ROW_1 = auto()
@@ -92,9 +85,7 @@ class SubsetType(Enum):
     TWO_BYTES = auto()
     ONE_BYTE = auto()
 
-
-def get_byte_indices(subset: SubsetType, byte_indices: Sequence[int] | None = None) -> List[int]:
-    """Повертає список байтових індексів для вибраного типу підмножини.
+"""Повертає список байтових індексів для вибраного типу підмножини.
     
     Args:
         subset: тип підмножини.
@@ -102,7 +93,9 @@ def get_byte_indices(subset: SubsetType, byte_indices: Sequence[int] | None = No
     
     Returns:
         Список байтових індексів у межах [0, 15].
-    """
+"""
+def get_byte_indices(subset: SubsetType, byte_indices: Sequence[int] | None = None) -> List[int]:
+
     if subset == SubsetType.FULL:
         return list(range(BLOCK_BYTES))
     elif subset == SubsetType.ROW_0:
@@ -143,16 +136,9 @@ def feature_size(subset: SubsetType, byte_indices: Sequence[int] | None = None) 
     return len(indices) * 2 * BITS_PER_BYTE
 
 
-# ---------------------------------------------------------------------------
-# Векторизація
-# ---------------------------------------------------------------------------
 
-def vectorize_subset(
-    ct0: bytes,
-    ct1: bytes,
-    indices: Sequence[int],
-) -> np.ndarray:
-    """Перетворює пару шифротекстів у бітовий вектор ознак.
+# Векторизація
+"""Перетворює пару шифротекстів у бітовий вектор ознак.
     
     Алгоритм (відповідає Zhang et al., Section 2.2):
       1. Вибираємо байти ct0[indices] та ct1[indices].
@@ -166,27 +152,23 @@ def vectorize_subset(
     
     Returns:
         np.ndarray dtype=uint8, форма (len(indices)*2*8,).
-    """
+"""
+
+def vectorize_subset(
+    ct0: bytes,
+    ct1: bytes,
+    indices: Sequence[int],
+) -> np.ndarray:
+
     ct0_sel = bytes(ct0[i] for i in indices)
     ct1_sel = bytes(ct1[i] for i in indices)
     merged = ct0_sel + ct1_sel
     return np.unpackbits(np.frombuffer(merged, dtype=np.uint8)).astype(np.float32)
 
 
-# ---------------------------------------------------------------------------
-# Основна функція генерації датасету
-# ---------------------------------------------------------------------------
 
-def generate_dataset(
-    backend,
-    n_samples: int,
-    input_diff: bytes,
-    rounds: int,
-    subset: SubsetType,
-    byte_indices: Sequence[int] | None = None,
-    fixed_key: bool = False,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Генерує датасет для навчання нейро-розрізнювача.
+# Основна функція генерації датасету
+"""Генерує датасет для навчання нейро-розрізнювача.
     
     Процедура генерації (Gohr, Algorithm 1; Zhang et al., Section 2.3):
     
@@ -211,7 +193,18 @@ def generate_dataset(
     Returns:
         X: np.ndarray float32, форма (n_samples, feature_size).
         y: np.ndarray float32, форма (n_samples,), значення 0 або 1.
-    """
+"""
+
+def generate_dataset(
+    backend,
+    n_samples: int,
+    input_diff: bytes,
+    rounds: int,
+    subset: SubsetType,
+    byte_indices: Sequence[int] | None = None,
+    fixed_key: bool = False,
+) -> Tuple[np.ndarray, np.ndarray]:
+
     if n_samples <= 0:
         raise ValueError("n_samples must be > 0")
     if len(input_diff) != BLOCK_BYTES:
@@ -246,16 +239,9 @@ def generate_dataset(
     return X, y
 
 
-# ---------------------------------------------------------------------------
 # Допоміжна функція для визначення num_blocks і word_size_bits
 # для моделі AESLikeResNetDistinguisher
-# ---------------------------------------------------------------------------
-
-def model_input_params(
-    subset: SubsetType,
-    byte_indices: Sequence[int] | None = None,
-) -> Tuple[int, int]:
-    """Повертає (num_blocks, word_size_bits) для ініціалізації моделі.
+"""Повертає (num_blocks, word_size_bits) для ініціалізації моделі.
     
     Мережа AESLikeResNetDistinguisher очікує:
       - num_blocks  = 2  (завжди, бо ми подаємо пару C0, C1)
@@ -263,21 +249,23 @@ def model_input_params(
     
     Returns:
         (num_blocks=2, word_size_bits)
-    """
+"""
+def model_input_params(
+    subset: SubsetType,
+    byte_indices: Sequence[int] | None = None,
+) -> Tuple[int, int]:
+
     indices = get_byte_indices(subset, byte_indices)
     return 2, len(indices) * BITS_PER_BYTE
 
 
-# ---------------------------------------------------------------------------
 # Конфігурації для систематичних експериментів (відповідають Таблицям 1-5
 # у Zhang et al., 2024)
-# ---------------------------------------------------------------------------
-
 # Стандартна вхідна різниця для Kalyna-128 (аналог delta=0x80 для AES-128)
 # Різниця в останньому байті (байт 15): позиція [рядок 3, стовпець 3].
 DEFAULT_INPUT_DIFF: bytes = bytes(15 * [0x00] + [0x01])
 
-# Набір конфігурацій для повного дослідження (Таблиця 1 дипломної роботи)
+# Набір конфігурацій для повного дослідження 
 EXPERIMENT_CONFIGS = [
     # (subset, byte_indices, description)
     (SubsetType.FULL,      None,    "Full ciphertext (128 bits)"),
