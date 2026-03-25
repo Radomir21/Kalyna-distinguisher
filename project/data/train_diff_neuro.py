@@ -14,6 +14,13 @@ train_diff_neuro.py  (ВИПРАВЛЕНА ВЕРСІЯ)
   Save     = best model by validation loss
   Metrics  = Acc, TPR, TNR  (як у Таблицях 1-5 статті)
 
+ВИПРАВЛЕННЯ відносно попередньої версії:
+  1. Матриця стану Калини-128 = 8×2 (8 рядків, 2 стовпці), а НЕ 4×4 як в AES.
+     Стовпець = 8 байтів (одне 64-бітне слово), рядок = 2 байти.
+  2. Індекси байтів виправлені з урахуванням column-major розкладки:
+     - Cross-word пари [r, r+8] замість same-word [14,15]
+     - COL_0/COL_1 замість ROW_3/COL_3
+  3. Додано контрольний тест (col 1 для 1-round має дати ~50%).
 
 Конфігурації таблиць з Diff_Neuro.pdf -> адаптовано для Калини:
   Table 1: 2-round, 3-round -- повний шифротекст
@@ -58,7 +65,7 @@ N_VAL     =   100_000   # у статті  1_000_000
 N_TEST    =   100_000   # у статті  1_000_000
 
 BATCH     = 1_000       # Bs = 1000  (Section 2.3)
-EPOCHS    = 10           # у статті 20 epochs  (Section 2.3)
+EPOCHS    = 20           # у статті 20 epochs  (Section 2.3)
 
 # Cyclic LR (Section 2.3)
 LR_BETA   = 2e-3        # beta = 0.002
@@ -88,9 +95,6 @@ OUT_DIR   = Path("results_diff_neuro")
 # ============================================================
 
 CONFIGS = [
-    # --- Table 1: повний шифротекст ---
-    (SubsetType.FULL,      None,     "T1_full_2r",             2),
-    (SubsetType.FULL,      None,     "T1_full_3r",             3),
 
     # --- Table 2: 3-round, один стовпець (= 8 байтів = 64 біти) ---
     # Col 0 (bytes 0-7): після 1 раунду з delta=byte15 тут ВСЯ різниця
@@ -113,12 +117,17 @@ CONFIGS = [
     # --- Table 5: 2-round, два байти <- головний результат ---
     # Cross-word пара: один рядок матриці = [r, r+8]
     # Це прямий аналог AES Table 5 де {0,1} давав ~100% accuracy
+    
     (SubsetType.TWO_BYTES, [0, 8],   "T5_2b_0_8_xword_2r",   2),
     (SubsetType.TWO_BYTES, [1, 9],   "T5_2b_1_9_xword_2r",   2),
     (SubsetType.TWO_BYTES, [7, 15],  "T5_2b_7_15_xword_2r",  2),
     # Same-word пара для порівняння (очікуємо слабший результат)
     (SubsetType.TWO_BYTES, [0, 1],   "T5_2b_0_1_sword_2r",   2),
     (SubsetType.TWO_BYTES, [8, 9],   "T5_2b_8_9_sword_2r",   2),
+
+        # --- Table 1: повний шифротекст ---
+    (SubsetType.FULL,      None,     "T1_full_2r",             2),
+    (SubsetType.FULL,      None,     "T1_full_3r",             3), 
 
     # --- Бонус: 1-round ---
     # Після 1 раунду різниця тільки в col 0 (байти 0-7)
@@ -187,6 +196,7 @@ def run(backend, device, subset, byte_indices, label, rounds):
     t_train       = time.time()
 
     for ep in range(EPOCHS):
+        t_ep = time.time()
         lr_now = scheduler.get_last_lr()[0] if ep > 0 else LR_BETA
 
         model.train()
@@ -211,11 +221,13 @@ def run(backend, device, subset, byte_indices, label, rounds):
             best_epoch    = ep + 1
             best_state    = {k: v.cpu().clone() for k, v in model.state_dict().items()}
 
+        ep_sec = time.time() - t_ep
         row = dict(
             epoch=ep+1, lr=round(lr_now,6),
             tr_loss=round(tr_loss_sum/tr_n,6), tr_acc=round(tr_correct/tr_n,6),
             vl_loss=round(vl_loss,6), vl_acc=round(vl_acc,6),
             vl_tpr=round(vl_tpr,6),  vl_tnr=round(vl_tnr,6),
+            epoch_sec=round(ep_sec,1),
         )
         history.append(row)
         marker = " <-" if ep+1 == best_epoch else ""
@@ -223,7 +235,8 @@ def run(backend, device, subset, byte_indices, label, rounds):
             f"  ep {ep+1:02d}/{EPOCHS}  lr={lr_now:.4f}  "
             f"tr_loss={tr_loss_sum/tr_n:.5f} tr_acc={tr_correct/tr_n:.4f}  "
             f"vl_loss={vl_loss:.5f} vl_acc={vl_acc:.4f}  "
-            f"TPR={vl_tpr:.4f} TNR={vl_tnr:.4f}{marker}"
+            f"TPR={vl_tpr:.4f} TNR={vl_tnr:.4f}  "
+            f"[{ep_sec:.1f}s]{marker}"
         )
 
     elapsed = time.time() - t_train
