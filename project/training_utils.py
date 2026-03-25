@@ -1,8 +1,14 @@
 """
-training_utils.py
+training_utils.py  (ВИПРАВЛЕНА ВЕРСІЯ)
 
 Спільні утиліти для навчання нейро-розрізнювача Калини.
 
+Виправлення:
+  - L2 регуляризація тепер застосовується ТІЛЬКИ до weight-параметрів
+    Conv1d та Linear шарів (не до bias, не до BatchNorm gamma/beta).
+    Це відповідає поведінці kernel_regularizer=l2(...) у Keras (Gohr, 2019).
+
+Посилання:
   - Gohr (CRYPTO 2019), Section 4.3
   - Zhang et al. (IEICE 2024), Section 2.3
 """
@@ -19,17 +25,20 @@ from project.data.dataset_builder import generate_dataset, DEFAULT_INPUT_DIFF
 
 
 # ---------------------------------------------------------------------------
-# MSE + L2 Loss 
+# MSE + L2 Loss (ВИПРАВЛЕНО)
 # ---------------------------------------------------------------------------
 
 class MSEWithL2Loss(nn.Module):
-    """
-    MSE loss + L2 weight regularization.
+    """MSE loss + L2 weight regularization.
 
     Gohr: 'mean square error loss plus a small penalty based on L2 weights
     regularization (with regularization parameter c = 10^-5)'
 
+    В Keras kernel_regularizer=l2(c) додає штраф тільки до kernel weights
+    (не до bias, не до BN параметрів). Ми відтворюємо цю поведінку.
+
     L(theta) = MSE(sigmoid(logits), y) + lambda * sum(w^2)
+    де w — тільки параметри типу "weight" у Conv1d та Linear шарах.
     """
 
     def __init__(self, model: nn.Module, l2_lambda: float = 1e-5):
@@ -38,10 +47,39 @@ class MSEWithL2Loss(nn.Module):
         self.l2_lambda = l2_lambda
         self.mse = nn.MSELoss()
 
+        # Кешуємо список параметрів, до яких застосовується L2.
+        # Включаємо тільки "weight" у Conv1d та Linear шарах.
+        # Виключаємо: bias (*.bias), BatchNorm (*.bn.*, *.weight у BatchNorm1d).
+        self._l2_params: list[nn.Parameter] = []
+        for name, param in model.named_parameters():
+            # Пропускаємо bias-и
+            if 'bias' in name:
+                continue
+            # Пропускаємо параметри BatchNorm (gamma = weight, beta = bias)
+            # BatchNorm1d weight/bias називаються як "...bn...weight" або
+            # "...BatchNorm...weight" в залежності від структури моделі
+            parts = name.split('.')
+            # Перевіряємо, чи батьківський модуль є BatchNorm
+            is_bn = False
+            module = model
+            for part in parts[:-1]:
+                if part.isdigit():
+                    module = module[int(part)]
+                else:
+                    module = getattr(module, part)
+            if isinstance(module, (nn.BatchNorm1d, nn.BatchNorm2d)):
+                continue
+            # Залишаємо тільки weight-параметри Conv1d та Linear
+            if parts[-1] == 'weight':
+                self._l2_params.append(param)
+
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         probs = torch.sigmoid(logits)
         mse_loss = self.mse(probs, targets)
-        l2_penalty = sum(p.pow(2).sum() for p in self.model.parameters())
+
+        # L2 штраф тільки для kernel weights (як у Keras)
+        l2_penalty = sum(p.pow(2).sum() for p in self._l2_params)
+
         return mse_loss + self.l2_lambda * l2_penalty
 
 

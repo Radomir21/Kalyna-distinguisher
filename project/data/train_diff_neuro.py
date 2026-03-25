@@ -1,25 +1,26 @@
 """
-train_diff_neuro.py
+train_diff_neuro.py  (ВИПРАВЛЕНА ВЕРСІЯ)
 
 Точна репліка конфігурації з Diff_Neuro.pdf (Zhang et al., IEICE 2024)
-для блокового шифру Калина.
+для блокового шифру Калина-128/128.
 
 Параметри взяті дослівно з Section 2.3:
   N        = 1_000_000   (у статті 10^7 -- тут зменшено у 10 разів)
   M (test) =   100_000   (у статті 10^6)
   Bs       = 1_000
-  Epochs   = 20
+  Epochs   = 10
   Loss     = MSE + L2(lambda = 10^-5)
   LR       = cyclic: beta=0.002, alpha=0.0001, n=9
   Save     = best model by validation loss
   Metrics  = Acc, TPR, TNR  (як у Таблицях 1-5 статті)
 
+
 Конфігурації таблиць з Diff_Neuro.pdf -> адаптовано для Калини:
   Table 1: 2-round, 3-round -- повний шифротекст
-  Table 2: 3-round -- один рядок, один стовпець
-  Table 3: 3-round -- два байти
+  Table 2: 3-round -- один стовпець (= 8 байтів = половина блоку)
+  Table 3: 3-round -- два байти (cross-word та same-word)
   Table 4: 2-round -- один байт
-  Table 5: 2-round -- два байти  - результат статті (=100% для AES)
+  Table 5: 2-round -- два байти (cross-word = головний результат)
 """
 
 from __future__ import annotations
@@ -49,7 +50,7 @@ from project.training_utils import (
 )
 
 # ============================================================
-# ПАРАМЕТРИ 
+# ПАРАМЕТРИ
 # ============================================================
 
 N_TRAIN   = 1_000_000   # у статті 10_000_000
@@ -57,7 +58,7 @@ N_VAL     =   100_000   # у статті  1_000_000
 N_TEST    =   100_000   # у статті  1_000_000
 
 BATCH     = 1_000       # Bs = 1000  (Section 2.3)
-EPOCHS    = 10          # у статті 20 epochs  (Section 2.3)
+EPOCHS    = 10           # у статті 20 epochs  (Section 2.3)
 
 # Cyclic LR (Section 2.3)
 LR_BETA   = 2e-3        # beta = 0.002
@@ -70,35 +71,61 @@ SEED      = 42
 OUT_DIR   = Path("results_diff_neuro")
 
 # ============================================================
-# Конфігурації таблиць із Diff_Neuro.pdf
+# Конфігурації (ВИПРАВЛЕНІ для Калини-128 з матрицею 8×2)
+#
+# Калина-128: state = uint64_t[2], INDEX(table, row, col) = table[row + col*8]
+#   col 0 = bytes 0-7  (word 0)
+#   col 1 = bytes 8-15 (word 1)
+#   row r = bytes [r, r+8]
+#
+# delta = 0x00..01 (byte 15 = row 7, col 1)
+# Після 1 раунду: ShiftRows переносить row 7 з col 1 → col 0,
+#   MixColumns поширює на весь col 0. Col 1 = нуль.
+# Після 2 раундів: обидва стовпці активні, cross-word пари [r, r+8]
+#   мають максимальну кореляцію (аналог AES Table 5).
+#
 # (subset, byte_indices, label, rounds)
 # ============================================================
 
 CONFIGS = [
     # --- Table 1: повний шифротекст ---
-    (SubsetType.FULL,      None,    "Table1_full_2r",   2),
-    (SubsetType.FULL,      None,    "Table1_full_3r",   3),
+    (SubsetType.FULL,      None,     "T1_full_2r",             2),
+    (SubsetType.FULL,      None,     "T1_full_3r",             3),
 
-    # --- Table 2: 3-round, один рядок / один стовпець ---
-    (SubsetType.ROW_3,     None,    "Table2_row3_3r",   3),
-    (SubsetType.COL_3,     None,    "Table2_col3_3r",   3),
+    # --- Table 2: 3-round, один стовпець (= 8 байтів = 64 біти) ---
+    # Col 0 (bytes 0-7): після 1 раунду з delta=byte15 тут ВСЯ різниця
+    # Col 1 (bytes 8-15): після 1 раунду тут НУЛЬ різниці
+    (SubsetType.COL_0,     None,     "T2_col0_3r",             3),
+    (SubsetType.COL_1,     None,     "T2_col1_3r",             3),
 
     # --- Table 3: 3-round, два байти ---
-    (SubsetType.TWO_BYTES, [14,15], "Table3_2b_14_15_3r", 3),
-    (SubsetType.TWO_BYTES, [0, 1],  "Table3_2b_0_1_3r",   3),
+    # Cross-word пара (по 1 байту з кожного слова, один рядок)
+    (SubsetType.TWO_BYTES, [0, 8],   "T3_2b_0_8_xword_3r",    3),
+    (SubsetType.TWO_BYTES, [7, 15],  "T3_2b_7_15_xword_3r",   3),
+    # Same-word пара (обидва з col 0) для порівняння
+    (SubsetType.TWO_BYTES, [0, 1],   "T3_2b_0_1_sword_3r",    3),
 
     # --- Table 4: 2-round, один байт ---
-    (SubsetType.ONE_BYTE,  [15],    "Table4_1b_15_2r",  2),
-    (SubsetType.ONE_BYTE,  [14],    "Table4_1b_14_2r",  2),
+    (SubsetType.ONE_BYTE,  [0],      "T4_1b_0_2r",            2),
+    (SubsetType.ONE_BYTE,  [15],     "T4_1b_15_2r",           2),
+    (SubsetType.ONE_BYTE,  [8],      "T4_1b_8_2r",            2),
 
     # --- Table 5: 2-round, два байти <- головний результат ---
-    (SubsetType.TWO_BYTES, [14,15], "Table5_2b_14_15_2r", 2),
-    (SubsetType.TWO_BYTES, [0, 1],  "Table5_2b_0_1_2r",   2),
-    (SubsetType.TWO_BYTES, [0,13],  "Table5_2b_0_13_2r",  2),
+    # Cross-word пара: один рядок матриці = [r, r+8]
+    # Це прямий аналог AES Table 5 де {0,1} давав ~100% accuracy
+    (SubsetType.TWO_BYTES, [0, 8],   "T5_2b_0_8_xword_2r",   2),
+    (SubsetType.TWO_BYTES, [1, 9],   "T5_2b_1_9_xword_2r",   2),
+    (SubsetType.TWO_BYTES, [7, 15],  "T5_2b_7_15_xword_2r",  2),
+    # Same-word пара для порівняння (очікуємо слабший результат)
+    (SubsetType.TWO_BYTES, [0, 1],   "T5_2b_0_1_sword_2r",   2),
+    (SubsetType.TWO_BYTES, [8, 9],   "T5_2b_8_9_sword_2r",   2),
 
-    # --- Додатково: 1-round (вже відомий хороший результат) ---
-    (SubsetType.TWO_BYTES, [14,15], "Bonus_2b_14_15_1r",  1),
-    (SubsetType.ONE_BYTE,  [15],    "Bonus_1b_15_1r",     1),
+    # --- Бонус: 1-round ---
+    # Після 1 раунду різниця тільки в col 0 (байти 0-7)
+    (SubsetType.TWO_BYTES, [0, 1],   "Bonus_2b_0_1_1r",      1),
+    (SubsetType.COL_0,     None,     "Bonus_col0_1r",         1),
+    # Col 1 для 1-round ПОВИНЕН дати ~50% (нуль різниці!) — контрольний тест
+    (SubsetType.COL_1,     None,     "Bonus_col1_1r_CONTROL", 1),
 ]
 
 
@@ -259,12 +286,12 @@ def main():
 
     # --- фінальна таблиця у форматі статті ---
     print(f"\n{'='*65}")
-    print(f"РЕЗУЛЬТАТИ  (N={N_TRAIN:,}")
-    print(f"{'Label':<28} {'R':>2}  {'Acc':>7}  {'TPR':>7}  {'TNR':>7}  {'Ep':>3}")
-    print("-"*60)
+    print(f"РЕЗУЛЬТАТИ  (N={N_TRAIN:,})")
+    print(f"{'Label':<30} {'R':>2}  {'Acc':>7}  {'TPR':>7}  {'TNR':>7}  {'Ep':>3}")
+    print("-"*65)
     for r in all_results:
         print(
-            f"{r['label'][:27]:<28} {r['rounds']:>2}  "
+            f"{r['label'][:29]:<30} {r['rounds']:>2}  "
             f"{r['test_acc']:>7.4f}  {r['test_tpr']:>7.4f}  "
             f"{r['test_tnr']:>7.4f}  {r['best_epoch']:>3}"
         )

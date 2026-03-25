@@ -1,25 +1,32 @@
 """
+dataset_builder.py  (ВИПРАВЛЕНА ВЕРСІЯ)
 
-Генерація датасетів для нейро-розрізнювача блокового шифру Калина.
+Генерація датасетів для нейро-розрізнювача блокового шифру Калина-128/128.
 
-Підтримує всі типи підмножин шифротексту, що описані у статтях:
+  Внутрішнє представлення: state = uint64_t[2]  (nb = 2 слова по 64 біт).
+  Макрос INDEX(table, row, col) = table[row + col * 8]  - column-major.
+  
+  Матриця стану Калини-128:
+  
+            col 0      col 1
+            (word 0)   (word 1)
+  row 0:   byte  0    byte  8
+  row 1:   byte  1    byte  9
+  row 2:   byte  2    byte 10
+  row 3:   byte  3    byte 11
+  row 4:   byte  4    byte 12
+  row 5:   byte  5    byte 13
+  row 6:   byte  6    byte 14
+  row 7:   byte  7    byte 15
+  
+  ShiftRows для nb=2:
+    rows 0-3: shift = 0  (без зсуву)
+    rows 4-7: shift = 1  (зсув на 1 стовпець)
+
+Підтримує типи підмножин, адаптовані для Калини:
   - Zhang et al. "Differential-Neural Cryptanalysis on AES" (IEICE 2024)
-  - Gohr "Improving Attacks on Round-Reduced Speck32/64 Using Deep Learning" (CRYPTO 2019)
+  - Gohr "Improving Attacks on Round-Reduced Speck32/64" (CRYPTO 2019)
   - Chen et al. "A Deep Learning aided Key-Recovery Framework for Large-State Block Ciphers"
-
-Математика задачі:
-  Розрізнювач навчається класифікувати пари шифротекстів (C0, C1):
-    label=1 (реальна пара):  C0 = E_k(P0),  C1 = E_k(P0 XOR delta)
-    label=0 (випадкова пара): C0 = E_k(P0),  C1 = E_k'(P1)  де P1 — випадковий
-
-  Для 128-бітного блоку (Kalyna-128/AES) матриця стану 4×4 байти:
-  
-    байт  0  1  2  3   <- рядок 0
-          4  5  6  7   <- рядок 1
-          8  9 10 11   <- рядок 2
-         12 13 14 15   <- рядок 3
-  
-    Стовпці: {0,4,8,12}, {1,5,9,13}, {2,6,10,14}, {3,7,11,15}
 """
 
 from __future__ import annotations
@@ -30,74 +37,154 @@ from typing import List, Sequence, Tuple
 import numpy as np
 
 
-BLOCK_BYTES = 16        # розмір блоку в байтах
-STATE_ROWS = 4          # кількість рядків матриці стану
-STATE_COLS = 4          # кількість стовпців матриці стану
+# ---------------------------------------------------------------------------
+# Параметри блоку Калини-128
+# ---------------------------------------------------------------------------
+
+BLOCK_BYTES  = 16       # розмір блоку в байтах
 BITS_PER_BYTE = 8
+
+#Калина-128 має 8 рядків і 2 стовпці, а не 4×4!
+STATE_ROWS   = 8        # кількість рядків матриці стану (байтів у слові)
+STATE_COLS   = 2        # кількість стовпців (64-бітних слів, nb=2)
+BYTES_PER_WORD = 8      # sizeof(uint64_t)
+
+
+# ---------------------------------------------------------------------------
+# Індексація байтів у матриці стану Калини
+# ---------------------------------------------------------------------------
+
+def _col_indices(col: int) -> List[int]:
+    """Байтові індекси одного стовпця (слова) матриці стану.
+    
+    Для Калини-128: стовпець = одне 64-бітне слово = 8 байтів.
+      col 0 → [0, 1, 2, 3, 4, 5, 6, 7]   (state[0])
+      col 1 → [8, 9, 10, 11, 12, 13, 14, 15] (state[1])
+    """
+    assert 0 <= col < STATE_COLS, f"col must be 0..{STATE_COLS-1}, got {col}"
+    return [col * BYTES_PER_WORD + row for row in range(STATE_ROWS)]
 
 
 def _row_indices(row: int) -> List[int]:
-    """Байтові індекси одного рядка матриці стану (0..3)."""
-    assert 0 <= row < STATE_ROWS
-    return [row * STATE_COLS + col for col in range(STATE_COLS)]
-
-
-def _col_indices(col: int) -> List[int]:
-    """Байтові індекси одного стовпця матриці стану (0..3)."""
-    assert 0 <= col < STATE_COLS
-    return [row * STATE_COLS + col for row in range(STATE_ROWS)]
-
-
-"""Для Kalyna-128-128 з вхідною різницею delta = 0x00..001
-ShiftRows зсуває рядки: рядок i зсувається на i байтів вліво.
-Після одного раунду (SubBytes → ShiftRows → MixColumns) різниця
-у байті 15 (рядок 3, стовпець 3) поширюється на стовпець 3 → {3,7,11,15}.
-
-Zhang et al. (Table 5) для AES виявили, що байти з ОДНАКОВИМИ
-позиціями у C0 і C1, залежно від обраної різниці delta, дають
-100% точність для 2-раундового розрізнювача.
-
-Для delta = 0x00000000000000000000000000000001 (байт 15):
-після 1 раунду: найсильніший сигнал у байтах 14,15 (Zhang et al., Table 5)
-BEST_2_BYTES_FOR_DELTA_LSB = [14, 15]
-"""
-
-"""Типи підмножин шифротексту, що вивчаються у роботі.
+    """Байтові індекси одного рядка матриці стану.
     
-    Відповідають розділам 3.1 і 3.2 Zhang et al. (2024):
-      FULL         — повний шифротекст (128 біт)    ознак 2*128=256 біт
-      ROW_i        — рядок i матриці стану (32 біт)  ознак 2*32=64 біт
-      COL_j        — стовпець j (32 біти)            ознак 2*32=64 біт
-      TWO_BYTES    — довільна пара байтів (16 біт)   ознак 2*16=32 біти
-      ONE_BYTE     — один байт (8 біт)               ознак 2*8=16 біт
+    Для Калини-128: рядок = 2 байти (по одному з кожного слова).
+      row 0 → [0, 8]
+      row 7 → [7, 15]
+    
+    INDEX(table, row, col) = table[row + col * 8]
+    """
+    assert 0 <= row < STATE_ROWS, f"row must be 0..{STATE_ROWS-1}, got {row}"
+    return [row + col * BYTES_PER_WORD for col in range(STATE_COLS)]
+
+
+def _byte_to_matrix_pos(byte_idx: int) -> Tuple[int, int]:
+    """Повертає (row, col) позицію байта в матриці стану Калини."""
+    assert 0 <= byte_idx < BLOCK_BYTES
+    col = byte_idx // BYTES_PER_WORD   # 0..7 → col 0,  8..15 → col 1
+    row = byte_idx % BYTES_PER_WORD    # позиція всередині слова
+    return row, col
+
+
+# ---------------------------------------------------------------------------
+# Аналіз диференціального поширення
+# ---------------------------------------------------------------------------
+
 """
+Для Калини-128 з delta = 0x00..01 (різниця у байті 15):
+
+  Байт 15 = (row=7, col=1).
+  
+  Після 1 раунду (SB → SR → MC):
+    - SubBytes: різниця залишається в (row=7, col=1)
+    - ShiftRows: row 7 зсувається на 1 → переходить в col 0
+    - MixColumns: MDS 8×8 поширює на весь стовпець 0 → байти 0-7 активні
+    
+    Результат: різниця в байтах [0,1,2,3,4,5,6,7], нуль у [8..15].
+
+  Після 2 раундів:
+    - SubBytes: 8 активних байтів (col 0)
+    - ShiftRows: rows 0-3 → col 0, rows 4-7 → col 1
+      Тобто: col 0 отримує rows 0-3, col 1 отримує rows 4-7
+    - MixColumns: обидва стовпці отримують повну різницю
+    
+    Результат: всі 16 байтів активні. Але між byte_r_col0 та byte_r_col1
+    є кореляція (аналог ∆10/∆11 у Zhang et al. для AES).
+
+Для 2-round distinguisher з 2 байтами оптимальний вибір:
+  - Два байти з ОДНОГО рядка (по 1 з кожного слова): [r, r+8]
+  - Це дає пару корельованих значень (аналог Table 5 у Zhang et al.)
+"""
+
+# Стандартна вхідна різниця для Калини-128
+# Різниця в останньому байті (байт 15): row=7, col=1 у матриці стану.
+DEFAULT_INPUT_DIFF: bytes = bytes(15 * [0x00] + [0x01])
+
+# Після 1 раунду з цією delta: різниця переміщується в col 0 (байти 0-7).
+# Після 2 раундів: різниця в усіх 16 байтах.
+
+# Найкращі 2 байти для 2-round distinguisher: один рядок = [r, r+8].
+# Обираємо row 0: байти [0, 8] — найпростіший вибір.
+BEST_2_BYTES_2ROUND = [0, 8]
+
+# Для 1-round distinguisher: різниця тільки в col 0 (байти 0-7).
+# Два байти з col 0: [0, 1] або [6, 7].
+BEST_2_BYTES_1ROUND = [0, 1]
+
+
+# ---------------------------------------------------------------------------
+# Типи підмножин шифротексту
+# ---------------------------------------------------------------------------
+
 class SubsetType(Enum):
-
-    FULL = auto()
-    ROW_0 = auto()
-    ROW_1 = auto()
-    ROW_2 = auto()
-    ROW_3 = auto()
-    COL_0 = auto()
-    COL_1 = auto()
-    COL_2 = auto()
-    COL_3 = auto()
-    TWO_BYTES = auto()
-    ONE_BYTE = auto()
-
-"""Повертає список байтових індексів для вибраного типу підмножини.
+    """Типи підмножин шифротексту для Калини-128.
     
-    Args:
-        subset: тип підмножини.
-        byte_indices: для SubsetType.TWO_BYTES або ONE_BYTE — конкретні індекси.
+    Адаптовано з Zhang et al. (2024) для матриці 8×2 (а не 4×4 як в AES):
     
-    Returns:
-        Список байтових індексів у межах [0, 15].
-"""
-def get_byte_indices(subset: SubsetType, byte_indices: Sequence[int] | None = None) -> List[int]:
+      FULL       — повний шифротекст (128 біт)        ознак 2*128=256 біт
+      COL_0/1    — стовпець (слово) стану (64 біти)    ознак 2*64=128 біт
+      ROW_r      — рядок r матриці стану (16 біт)      ознак 2*16=32 біти
+      TWO_BYTES  — довільна пара байтів (16 біт)       ознак 2*16=32 біти
+      ONE_BYTE   — один байт (8 біт)                   ознак 2*8=16 біт
+    
+    рядок Калини-128 містить лише 2 байти (а не 4 як в AES),
+    а стовпець — 8 байтів (а не 4). Тому ROW дає таку ж кількість ознак,
+    як TWO_BYTES, а COL еквівалентний "half ciphertext".
+    """
+    FULL       = auto()
+    COL_0      = auto()   # стовпець 0 = word 0 = байти 0-7
+    COL_1      = auto()   # стовпець 1 = word 1 = байти 8-15
+    ROW_0      = auto()   # рядок 0 = [0, 8]
+    ROW_1      = auto()
+    ROW_2      = auto()
+    ROW_3      = auto()
+    ROW_4      = auto()
+    ROW_5      = auto()
+    ROW_6      = auto()
+    ROW_7      = auto()
+    TWO_BYTES  = auto()   # довільна пара байтів
+    ONE_BYTE   = auto()   # один байт
 
+
+def get_byte_indices(
+    subset: SubsetType, 
+    byte_indices: Sequence[int] | None = None,
+) -> List[int]:
+    """Повертає список байтових індексів для вибраного типу підмножини.
+    
+    Індекси відповідають порядку байтів у пам'яті:
+      [0..7] = word 0 (state[0]), [8..15] = word 1 (state[1]).
+    """
     if subset == SubsetType.FULL:
         return list(range(BLOCK_BYTES))
+    
+    # Стовпці (слова) — 8 байтів кожен
+    elif subset == SubsetType.COL_0:
+        return _col_indices(0)
+    elif subset == SubsetType.COL_1:
+        return _col_indices(1)
+    
+    # Рядки — 2 байти кожен (по 1 з кожного слова)
     elif subset == SubsetType.ROW_0:
         return _row_indices(0)
     elif subset == SubsetType.ROW_1:
@@ -106,27 +193,37 @@ def get_byte_indices(subset: SubsetType, byte_indices: Sequence[int] | None = No
         return _row_indices(2)
     elif subset == SubsetType.ROW_3:
         return _row_indices(3)
-    elif subset == SubsetType.COL_0:
-        return _col_indices(0)
-    elif subset == SubsetType.COL_1:
-        return _col_indices(1)
-    elif subset == SubsetType.COL_2:
-        return _col_indices(2)
-    elif subset == SubsetType.COL_3:
-        return _col_indices(3)
+    elif subset == SubsetType.ROW_4:
+        return _row_indices(4)
+    elif subset == SubsetType.ROW_5:
+        return _row_indices(5)
+    elif subset == SubsetType.ROW_6:
+        return _row_indices(6)
+    elif subset == SubsetType.ROW_7:
+        return _row_indices(7)
+    
+    # Довільні підмножини
     elif subset == SubsetType.TWO_BYTES:
         if byte_indices is None or len(byte_indices) != 2:
             raise ValueError("For TWO_BYTES, provide exactly 2 byte indices.")
+        for idx in byte_indices:
+            if not (0 <= idx < BLOCK_BYTES):
+                raise ValueError(f"Byte index {idx} out of range [0, {BLOCK_BYTES-1}]")
         return list(byte_indices)
     elif subset == SubsetType.ONE_BYTE:
         if byte_indices is None or len(byte_indices) != 1:
             raise ValueError("For ONE_BYTE, provide exactly 1 byte index.")
+        if not (0 <= byte_indices[0] < BLOCK_BYTES):
+            raise ValueError(f"Byte index {byte_indices[0]} out of range")
         return list(byte_indices)
     else:
         raise ValueError(f"Unknown subset type: {subset}")
 
 
-def feature_size(subset: SubsetType, byte_indices: Sequence[int] | None = None) -> int:
+def feature_size(
+    subset: SubsetType, 
+    byte_indices: Sequence[int] | None = None,
+) -> int:
     """Розмір вектора ознак (у бітах) для пари шифротекстів.
     
     Формула: len(byte_indices) * 2 * 8
@@ -136,64 +233,31 @@ def feature_size(subset: SubsetType, byte_indices: Sequence[int] | None = None) 
     return len(indices) * 2 * BITS_PER_BYTE
 
 
-
+# ---------------------------------------------------------------------------
 # Векторизація
-"""Перетворює пару шифротекстів у бітовий вектор ознак.
-    
-    Алгоритм (відповідає Zhang et al., Section 2.2):
-      1. Вибираємо байти ct0[indices] та ct1[indices].
-      2. Конкатенуємо: [ct0_sel || ct1_sel].
-      3. Розпаковуємо у біти (MSB-first через numpy.unpackbits).
-    
-    Args:
-        ct0: перший шифротекст (BLOCK_BYTES байтів).
-        ct1: другий шифротекст (BLOCK_BYTES байтів).
-        indices: список байтових індексів для вибору.
-    
-    Returns:
-        np.ndarray dtype=uint8, форма (len(indices)*2*8,).
-"""
+# ---------------------------------------------------------------------------
 
 def vectorize_subset(
     ct0: bytes,
     ct1: bytes,
     indices: Sequence[int],
 ) -> np.ndarray:
-
+    """Перетворює пару шифротекстів у бітовий вектор ознак.
+    
+    Алгоритм (відповідає Zhang et al., Section 2.2):
+      1. Вибираємо байти ct0[indices] та ct1[indices].
+      2. Конкатенуємо: [ct0_sel || ct1_sel].
+      3. Розпаковуємо у біти (MSB-first через numpy.unpackbits).
+    """
     ct0_sel = bytes(ct0[i] for i in indices)
     ct1_sel = bytes(ct1[i] for i in indices)
     merged = ct0_sel + ct1_sel
     return np.unpackbits(np.frombuffer(merged, dtype=np.uint8)).astype(np.float32)
 
 
-
-# Основна функція генерації датасету
-"""Генерує датасет для навчання нейро-розрізнювача.
-    
-    Процедура генерації (Gohr, Algorithm 1; Zhang et al., Section 2.3):
-    
-    Для кожного зразка i:
-      1. Обираємо label_i ~ Bernoulli(0.5).
-      2. Генеруємо ключ k_i (або використовуємо master_key при fixed_key=True).
-      3. Генеруємо випадковий відкритий текст P0.
-      4. Якщо label=1: P1 = P0 XOR input_diff   (диференціальна пара)
-         Якщо label=0: P1 = random_block()        (незалежний шифротекст)
-      5. C0 = E_k(P0, rounds),  C1 = E_k(P1, rounds)  (зашифрування за rounds раундів)
-      6. Вибираємо підмножину байтів з C0 та C1 і перетворюємо у бітовий вектор.
-    
-    Args:
-        backend: KalynaBackend з методами random_block, random_key, encrypt_rounds.
-        n_samples: кількість зразків.
-        input_diff: вхідна різниця delta (bytes, довжина = BLOCK_BYTES).
-        rounds: кількість раундів шифрування.
-        subset: тип підмножини шифротексту.
-        byte_indices: конкретні байти для ONE_BYTE або TWO_BYTES.
-        fixed_key: якщо True — всі зразки шифруються одним ключем.
-    
-    Returns:
-        X: np.ndarray float32, форма (n_samples, feature_size).
-        y: np.ndarray float32, форма (n_samples,), значення 0 або 1.
-"""
+# ---------------------------------------------------------------------------
+# Генерація датасету
+# ---------------------------------------------------------------------------
 
 def generate_dataset(
     backend,
@@ -204,14 +268,25 @@ def generate_dataset(
     byte_indices: Sequence[int] | None = None,
     fixed_key: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray]:
-
+    """Генерує датасет для навчання нейро-розрізнювача.
+    
+    Процедура генерації (Gohr, Algorithm 1; Zhang et al., Section 2.3):
+    
+    Для кожного зразка i:
+      1. Обираємо label_i ~ Bernoulli(0.5).
+      2. Генеруємо ключ k_i (або використовуємо master_key при fixed_key=True).
+      3. Генеруємо випадковий відкритий текст P0.
+      4. Якщо label=1: P1 = P0 XOR input_diff   (диференціальна пара)
+         Якщо label=0: P1 = random_block()        (незалежний шифротекст)
+      5. C0 = E_k(P0, rounds),  C1 = E_k(P1, rounds)
+      6. Вибираємо підмножину байтів з C0 та C1 і перетворюємо у бітовий вектор.
+    """
     if n_samples <= 0:
         raise ValueError("n_samples must be > 0")
     if len(input_diff) != BLOCK_BYTES:
         raise ValueError(f"input_diff must be {BLOCK_BYTES} bytes, got {len(input_diff)}")
 
     indices = get_byte_indices(subset, byte_indices)
-
     master_key = backend.random_key() if fixed_key else None
 
     X_list = []
@@ -239,43 +314,52 @@ def generate_dataset(
     return X, y
 
 
-# Допоміжна функція для визначення num_blocks і word_size_bits
-# для моделі AESLikeResNetDistinguisher
-"""Повертає (num_blocks, word_size_bits) для ініціалізації моделі.
-    
-    Мережа AESLikeResNetDistinguisher очікує:
-      - num_blocks  = 2  (завжди, бо ми подаємо пару C0, C1)
-      - word_size_bits = len(byte_indices) * 8
-    
-    Returns:
-        (num_blocks=2, word_size_bits)
-"""
+# ---------------------------------------------------------------------------
+# Параметри моделі
+# ---------------------------------------------------------------------------
+
 def model_input_params(
     subset: SubsetType,
     byte_indices: Sequence[int] | None = None,
 ) -> Tuple[int, int]:
-
+    """Повертає (num_blocks, word_size_bits) для ініціалізації моделі.
+    
+    Мережа AESLikeResNetDistinguisher очікує:
+      - num_blocks  = 2  (завжди, бо ми подаємо пару C0, C1)
+      - word_size_bits = len(byte_indices) * 8
+    """
     indices = get_byte_indices(subset, byte_indices)
     return 2, len(indices) * BITS_PER_BYTE
 
 
-# Конфігурації для систематичних експериментів (відповідають Таблицям 1-5
-# у Zhang et al., 2024)
-# Стандартна вхідна різниця для Kalyna-128 (аналог delta=0x80 для AES-128)
-# Різниця в останньому байті (байт 15): позиція [рядок 3, стовпець 3].
-DEFAULT_INPUT_DIFF: bytes = bytes(15 * [0x00] + [0x01])
+# ---------------------------------------------------------------------------
+# Конфігурації для систематичних експериментів
+# ---------------------------------------------------------------------------
 
-# Набір конфігурацій для повного дослідження 
 EXPERIMENT_CONFIGS = [
     # (subset, byte_indices, description)
+    
+    # Повний шифротекст
     (SubsetType.FULL,      None,    "Full ciphertext (128 bits)"),
-    (SubsetType.ROW_3,     None,    "Row 3 of state (bytes 12-15)"),
-    (SubsetType.ROW_0,     None,    "Row 0 of state (bytes 0-3)"),
-    (SubsetType.COL_3,     None,    "Column 3 of state (bytes 3,7,11,15)"),
-    (SubsetType.COL_0,     None,    "Column 0 of state (bytes 0,4,8,12)"),
-    (SubsetType.TWO_BYTES, [14, 15], "2 bytes [14,15] (best for delta_LSB)"),
-    (SubsetType.TWO_BYTES, [0, 1],   "2 bytes [0,1]"),
-    (SubsetType.TWO_BYTES, [0, 13],  "2 bytes [0,13] (AES-style)"),
-    (SubsetType.ONE_BYTE,  [15],     "1 byte [15] (LSB position)"),
-    (SubsetType.ONE_BYTE,  [14],     "1 byte [14]"),
+    
+    # Стовпці (слова) — аналог "half ciphertext"
+    (SubsetType.COL_0,     None,    "Column 0 / Word 0 (bytes 0-7, 64 bits)"),
+    (SubsetType.COL_1,     None,    "Column 1 / Word 1 (bytes 8-15, 64 bits)"),
+    
+    # Рядки — по 2 байти (по одному з кожного слова)
+    (SubsetType.ROW_0,     None,    "Row 0 (bytes 0,8)"),
+    (SubsetType.ROW_7,     None,    "Row 7 (bytes 7,15)"),
+    
+    # 2 байти з одного рядка (= cross-word pair, аналог Table 5 у Zhang et al.)
+    (SubsetType.TWO_BYTES, [0, 8],  "2 bytes [0,8] (row 0, cross-word)"),
+    (SubsetType.TWO_BYTES, [7, 15], "2 bytes [7,15] (row 7, cross-word)"),
+    (SubsetType.TWO_BYTES, [3, 11], "2 bytes [3,11] (row 3, cross-word)"),
+    
+    # 2 байти з одного стовпця (слова)
+    (SubsetType.TWO_BYTES, [0, 1],  "2 bytes [0,1] (col 0, same word)"),
+    (SubsetType.TWO_BYTES, [8, 9],  "2 bytes [8,9] (col 1, same word)"),
+    
+    # 1 байт
+    (SubsetType.ONE_BYTE,  [0],     "1 byte [0] (col 0, row 0)"),
+    (SubsetType.ONE_BYTE,  [15],    "1 byte [15] (col 1, row 7)"),
 ]
