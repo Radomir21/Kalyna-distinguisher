@@ -46,10 +46,10 @@ from torch.utils.data import DataLoader, TensorDataset
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT.parent.parent))
 
-from project.backend.kalyna_backend import KalynaBackend
+from project.backend.kalyna_adapter import KalynaAdapter
 from project.models.neuro_distinguisher import AESLikeResNetDistinguisher
 from project.data.dataset_builder import SubsetType, model_input_params
-from project.training_utils import (
+from project.train_test.training_utils import (
     MSEWithL2Loss,
     make_lr_scheduler,
     evaluate,
@@ -117,7 +117,7 @@ CONFIGS = [
     # --- Table 5: 2-round, два байти <- головний результат ---
     # Cross-word пара: один рядок матриці = [r, r+8]
     # Це прямий аналог AES Table 5 де {0,1} давав ~100% accuracy
-    
+
     (SubsetType.TWO_BYTES, [0, 8],   "T5_2b_0_8_xword_2r",   2),
     (SubsetType.TWO_BYTES, [1, 9],   "T5_2b_1_9_xword_2r",   2),
     (SubsetType.TWO_BYTES, [7, 15],  "T5_2b_7_15_xword_2r",  2),
@@ -283,7 +283,7 @@ def main():
     print(f"Loss   : MSE + L2(lambda={L2_LAM})")
     print(f"LR     : cyclic beta={LR_BETA} alpha={LR_ALPHA} n={LR_N}")
 
-    backend = KalynaBackend()
+    backend = KalynaAdapter()
     all_results = []
 
     for subset, byte_idx, label, rounds in CONFIGS:
