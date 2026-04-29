@@ -14,7 +14,7 @@ def main():
 
     X, y = generate_dataset(
         backend=backend,
-        n_samples=8,
+        n_samples=100,
         input_diff=DEFAULT_INPUT_DIFF,
         rounds=2,
         subset=SubsetType.FULL,

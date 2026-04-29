@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import secrets
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -172,6 +173,14 @@ class KalynaAdapter:
             )
 
         return self._buffer_to_bytes(out_buf, self.config.block_size_bytes)
+
+    def random_key(self) -> bytes:
+        """Generate a random key of the appropriate size."""
+        return secrets.token_bytes(self.config.key_size_bytes)
+
+    def random_block(self) -> bytes:
+        """Generate a random block of the appropriate size."""
+        return secrets.token_bytes(self.config.block_size_bytes)
 
 
 def get_default_dll_path() -> Path:

@@ -7,21 +7,42 @@ from torch.utils.data import DataLoader, TensorDataset
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from project.backend.kalyna_adapter import KalynaAdapter, make_default_adapter
+from project.backend.kalyna_adapter import make_default_adapter
 from project.models.neuro_distinguisher import AESLikeResNetDistinguisher
 from project.data.dataset_builder import SubsetType, model_input_params, generate_dataset, DEFAULT_INPUT_DIFF
 from project.train_test.training_utils import MSEWithL2Loss, make_lr_scheduler, evaluate
 
 random.seed(42); np.random.seed(42); torch.manual_seed(42)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-backend = KalynaAdapter()
+backend = make_default_adapter()
 
 TESTS = [
     # (rounds, subset, byte_idx, label)
-    (1, SubsetType.COL_0,     None,   "1r_col0_should_work"),
-    (1, SubsetType.COL_1,     None,   "1r_col1_should_be_50%"),
-    (2, SubsetType.TWO_BYTES, [0, 8], "2r_xword_0_8"),
-    (2, SubsetType.FULL,      None,   "2r_full"),
+    (1, SubsetType.ONE_BYTE, [0],   "1r_byte0"),
+    (1, SubsetType.ONE_BYTE, [8],   "1r_byte8"),
+    (2, SubsetType.ONE_BYTE, [0],   "2r_byte0"),
+    (2, SubsetType.ONE_BYTE, [8],   "2r_byte8"),
+    (1, SubsetType.ONE_BYTE, [15], "1r_byte15"),
+    (2, SubsetType.ONE_BYTE, [15], "2r_byte15"),
+    (1, SubsetType.ROW_0,     None,   "1r_row0"),
+    (2, SubsetType.ROW_0,     None,   "2r_row0"),
+    (1, SubsetType.ROW_1,     None,   "1r_row1"),
+    (2, SubsetType.ROW_1,     None,   "2r_row1"),
+    (1, SubsetType.ROW_2,     None,   "1r_row2"),
+    (2, SubsetType.ROW_2,     None,   "2r_row2"),
+    (1, SubsetType.ROW_3,     None,   "1r_row3"),
+    (2, SubsetType.ROW_3,     None,   "2r_row3"),
+    (1, SubsetType.ROW_4,     None,   "1r_row4"),
+    (2, SubsetType.ROW_4,     None,   "2r_row4"),
+    (1, SubsetType.ROW_5,     None,   "1r_row5"),
+    (2, SubsetType.ROW_5,     None,   "2r_row5"),
+    (1, SubsetType.ROW_6,     None,   "1r_row6"),
+    (2, SubsetType.ROW_6,     None,   "2r_row6"),
+    (1, SubsetType.ROW_7,     None,   "1r_row7"),
+    (2, SubsetType.ROW_7,     None,   "2r_row7"),
+    (1, SubsetType.COL_0,     None,   "1r_col0"),
+    (1, SubsetType.COL_1,     None,   "1r_col1"),
+    (2, SubsetType.TWO_BYTES, [0, 8], "2r_xword_0_8")
 ]
 
 for rounds, subset, byte_idx, label in TESTS:
@@ -40,7 +61,9 @@ for rounds, subset, byte_idx, label in TESTS:
     optimizer = torch.optim.Adam(model.parameters(), lr=2e-3)
     scheduler = make_lr_scheduler(optimizer, 1e-4, 2e-3, 9)
     
-    for ep in range(10):
+    EP = 20 
+
+    for ep in range(EP):
         t0 = time.time()
         model.train()
         for xb, yb in tr_loader:

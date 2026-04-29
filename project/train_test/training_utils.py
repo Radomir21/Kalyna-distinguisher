@@ -57,7 +57,7 @@ class MSEWithL2Loss(nn.Module):
                 continue
             # Пропускаємо параметри BatchNorm (gamma = weight, beta = bias)
             # BatchNorm1d weight/bias називаються як "...bn...weight" або
-            # "...BatchNorm...weight" в залежності від структури моделі
+            # "...BatchNorm...weight"
             parts = name.split('.')
             # Перевіряємо, чи батьківський модуль є BatchNorm
             is_bn = False

@@ -1,11 +1,10 @@
 """
  Генерація датасетів для нейро-розрізнювача блокового шифру Калина-128/128.
 
-КЛЮЧОВЕ ВИПРАВЛЕННЯ:
   Калина-128 має матрицю стану 8×2 (8 рядків, 2 стовпці)
   
   Внутрішнє представлення: state = uint64_t[2]  (nb = 2 слова по 64 біт).
-  Макрос INDEX(table, row, col) = table[row + col * 8]  column-major.
+  
   
   Матриця стану Калини-128:
   
@@ -50,6 +49,19 @@ STATE_ROWS   = 8        # кількість рядків матриці ста�
 STATE_COLS   = 2        # кількість стовпців (64-бітних слів, nb=2)
 BYTES_PER_WORD = 8      # sizeof(uint64_t)
 
+# Аддитивна різниця: +1 у word 0 (молодше 64-бітне слово)
+# Представлена як пара (delta_word0, delta_word1) для модулярного додавання
+ADDITIVE_DELTA_WORDS: Tuple[int, int] = (1, 0)
+
+# Для зворотної сумісності зберігаємо DEFAULT_INPUT_DIFF як bytes
+# (використовується тільки для підпису, реальна різниця — аддитивна)
+DEFAULT_INPUT_DIFF: bytes = (1).to_bytes(8, 'little') + (0).to_bytes(8, 'little')
+
+MOD64 = 2**64
+
+# Найкращі 2 байти для 2-round distinguisher: один рядок = [r, r+8].
+BEST_2_BYTES_2ROUND = [0, 8]
+BEST_2_BYTES_1ROUND = [0, 1]
 
 # ---------------------------------------------------------------------------
 # Індексація байтів у матриці стану Калини
@@ -92,9 +104,7 @@ def _byte_to_matrix_pos(byte_idx: int) -> Tuple[int, int]:
 # ---------------------------------------------------------------------------
 
 """
-КЛЮЧОВА ВІДМІННІСТЬ КАЛИНИ ВІД AES:
-  AES:    AddRoundKey = XOR          → XOR-різниця зберігається: (P⊕Δ)⊕K = (P⊕K)⊕Δ
-  Калина: AddRoundKey(0) = mod 2^64  → XOR-різниця НЕ зберігається!
+
   
   Тому для Калини потрібна АДДИТИВНА різниця:
     (P + Δ) + K = (P + K) + Δ  (mod 2^64)  ← зберігається ідеально!
@@ -112,19 +122,7 @@ def _byte_to_matrix_pos(byte_idx: int) -> Tuple[int, int]:
   мають максимальну кореляцію.
 """
 
-# Аддитивна різниця: +1 у word 0 (молодше 64-бітне слово)
-# Представлена як пара (delta_word0, delta_word1) для модулярного додавання
-ADDITIVE_DELTA_WORDS: Tuple[int, int] = (1, 0)
 
-# Для зворотної сумісності зберігаємо DEFAULT_INPUT_DIFF як bytes
-# (використовується тільки для підпису, реальна різниця — аддитивна)
-DEFAULT_INPUT_DIFF: bytes = (1).to_bytes(8, 'little') + (0).to_bytes(8, 'little')
-
-MOD64 = 2**64
-
-# Найкращі 2 байти для 2-round distinguisher: один рядок = [r, r+8].
-BEST_2_BYTES_2ROUND = [0, 8]
-BEST_2_BYTES_1ROUND = [0, 1]
 
 
 def make_additive_pair(pt0: bytes, delta_words: Tuple[int, int] = ADDITIVE_DELTA_WORDS) -> bytes:
@@ -260,16 +258,19 @@ def vectorize_subset(
     indices: Sequence[int],
 ) -> np.ndarray:
     """Перетворює пару шифротекстів у бітовий вектор ознак.
-    
+
     Алгоритм (відповідає Zhang et al., Section 2.2):
       1. Вибираємо байти ct0[indices] та ct1[indices].
       2. Конкатенуємо: [ct0_sel || ct1_sel].
       3. Розпаковуємо у біти (MSB-first через numpy.unpackbits).
+
+    Повертає uint8 (0/1) для економії пам'яті (×4 менше ніж float32).
+    Конвертуйте у float32 при передачі в PyTorch: tensor.float()
     """
     ct0_sel = bytes(ct0[i] for i in indices)
     ct1_sel = bytes(ct1[i] for i in indices)
     merged = ct0_sel + ct1_sel
-    return np.unpackbits(np.frombuffer(merged, dtype=np.uint8)).astype(np.float32)
+    return np.unpackbits(np.frombuffer(merged, dtype=np.uint8))
 
 
 # ---------------------------------------------------------------------------
@@ -310,10 +311,12 @@ def generate_dataset(
     indices = get_byte_indices(subset, byte_indices)
     master_key = backend.random_key() if fixed_key else None
 
-    X_list = []
-    y_list = []
+    feat_size = len(indices) * 2 * BITS_PER_BYTE
+    # uint8 замість float32: 0/1 бити не потребують float → ×4 менше пам'яті
+    X = np.empty((n_samples, feat_size), dtype=np.uint8)
+    y = np.empty(n_samples, dtype=np.float32)
 
-    for _ in range(n_samples):
+    for i in range(n_samples):
         label = int(np.random.randint(0, 2))
         key = master_key if fixed_key else backend.random_key()
         pt0 = backend.random_block()
@@ -327,12 +330,54 @@ def generate_dataset(
         ct0 = backend.encrypt_rounds(pt0, key, rounds)
         ct1 = backend.encrypt_rounds(pt1, key, rounds)
 
-        features = vectorize_subset(ct0, ct1, indices)
-        X_list.append(features)
-        y_list.append(label)
+        X[i] = vectorize_subset(ct0, ct1, indices)
+        y[i] = label
 
-    X = np.stack(X_list).astype(np.float32)
-    y = np.array(y_list, dtype=np.float32)
+    return X, y
+
+
+def generate_dataset_selected_bytes(
+    backend,
+    n_samples: int,
+    input_diff: bytes,
+    rounds: int,
+    byte_indices: Sequence[int],
+    fixed_key: bool = False,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Генерує датасет для довільної множини вибраних байтів шифротексту."""
+    if not byte_indices:
+        raise ValueError("byte_indices must be a non-empty sequence")
+    if any(not (0 <= idx < BLOCK_BYTES) for idx in byte_indices):
+        raise ValueError(f"byte_indices must be in range 0..{BLOCK_BYTES-1}")
+
+    if n_samples <= 0:
+        raise ValueError("n_samples must be > 0")
+    if len(input_diff) != BLOCK_BYTES:
+        raise ValueError(f"input_diff must be {BLOCK_BYTES} bytes, got {len(input_diff)}")
+
+    master_key = backend.random_key() if fixed_key else None
+
+    feat_size = len(list(byte_indices)) * 2 * BITS_PER_BYTE
+    # uint8 замість float32: 0/1 бити не потребують float → ×4 менше пам'яті
+    X = np.empty((n_samples, feat_size), dtype=np.uint8)
+    y = np.empty(n_samples, dtype=np.float32)
+
+    for i in range(n_samples):
+        label = int(np.random.randint(0, 2))
+        key = master_key if fixed_key else backend.random_key()
+        pt0 = backend.random_block()
+
+        if label == 1:
+            pt1 = make_additive_pair(pt0, ADDITIVE_DELTA_WORDS)
+        else:
+            pt1 = backend.random_block()
+
+        ct0 = backend.encrypt_rounds(pt0, key, rounds)
+        ct1 = backend.encrypt_rounds(pt1, key, rounds)
+
+        X[i] = vectorize_subset(ct0, ct1, list(byte_indices))
+        y[i] = label
+
     return X, y
 
 
